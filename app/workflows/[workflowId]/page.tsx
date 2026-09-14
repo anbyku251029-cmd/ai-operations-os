@@ -13,6 +13,7 @@ import {
   mapDbEdgesToEditor,
 } from '@/lib/persistence/workflow-mapper';
 import { useEditorStore } from '@/stores/useEditorStore';
+import { DEFAULT_INITIAL_SECTIONS } from '@/features/editor/types/section';
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -21,7 +22,7 @@ export default function WorkflowDetailPage() {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
-  const { setSections, setNodes, setEdges, setSaveStatus } = useEditorStore();
+  const { setSections, setNodes, setEdges, setSaveStatus, resetEditor } = useEditorStore();
 
   const fetchBundle = useCallback(
     async (isRetryAction = false) => {
@@ -31,6 +32,8 @@ export default function WorkflowDetailPage() {
         setIsRetrying(true);
       } else {
         setIsLoading(true);
+        // 이전 워크플로우 상태 오염 방지를 위해 스토어 초기화
+        resetEditor();
       }
 
       try {
@@ -38,30 +41,38 @@ export default function WorkflowDetailPage() {
         if (bundle && bundle.workflow) {
           setWorkflow(bundle.workflow);
 
-          // DB에 저장된 섹션 및 노드가 있는 경우 매퍼를 통해 스토어에 주입
+          // DB에 저장된 섹션이 있는 경우 매퍼를 통해 주입, 없으면 기본 섹션
           if (bundle.sections && bundle.sections.length > 0) {
             const editorSections = mapDbSectionsToEditor(bundle.sections);
             setSections(editorSections);
+          } else {
+            setSections(DEFAULT_INITIAL_SECTIONS);
           }
 
+          // DB에 저장된 노드가 있는 경우 매퍼를 통해 주입, 없으면 빈 배열로 초기화
           if (bundle.nodes && bundle.nodes.length > 0) {
             const editorNodes = mapDbNodesToEditor(bundle.nodes);
             const editorEdges = mapDbEdgesToEditor(bundle.edges || []);
             setNodes(editorNodes);
             setEdges(editorEdges);
+          } else {
+            setNodes([]);
+            setEdges([]);
           }
           setSaveStatus('saved');
         } else {
           setWorkflow(null);
+          resetEditor();
         }
       } catch {
         setWorkflow(null);
+        resetEditor();
       } finally {
         setIsLoading(false);
         setIsRetrying(false);
       }
     },
-    [workflowId, setSections, setNodes, setEdges, setSaveStatus]
+    [workflowId, setSections, setNodes, setEdges, setSaveStatus, resetEditor]
   );
 
   useEffect(() => {

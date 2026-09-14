@@ -287,4 +287,44 @@ describe('PHASE 08: Workflow Persistence & Explicit Save Tests', () => {
     const nonexistentBundle = await loadWorkflowBundle('nonexistent-workflow-id-999');
     expect(nonexistentBundle).toBeNull();
   });
+
+  // Test 11: [P1 FIX] Supabase 저장 실패 시 절대 success: true로 위장하지 않고 error를 반환한다
+  it('Test 11: Supabase 저장 실패 시 silent fallback 없이 명확한 failure 결과와 에러 메시지를 반환한다', async () => {
+    // 임의의 Supabase URL/KEY를 임시 주입하여 실제 DB 저장 시도 상태 모의
+    const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const origKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://fake-project.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'fake-anon-key';
+
+    try {
+      const snapshot: EditorWorkflowSnapshot = {
+        workflowId: 'wf-fail-test',
+        nodes: [{ id: 'node-fail', type: 'workflowNode', position: { x: 0, y: 0 }, data: { workflowNodeId: 'node-fail', name: '실패 검증' } }],
+        edges: [],
+      };
+
+      const result = await saveWorkflowSnapshot(snapshot);
+      // 저장이 실패해야 하며, 절대 가짜 success: true가 반환되어서는 안 됨
+      expect(result.success).toBe(false);
+      expect(result.error).toBeDefined();
+    } finally {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = origUrl;
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = origKey;
+    }
+  });
+
+  // Test 12: 저장 실패 후에도 에디터의 인메모리 노드 및 섹션 상태는 유실되지 않고 보존된다
+  it('Test 12: 저장이 실패해도 사용자의 인메모리 편집 상태가 유실되지 않고 유지되어 재시도가 가능하다', async () => {
+    const testNodeId = useEditorStore.getState().addNode('새 작업 단계');
+    expect(useEditorStore.getState().nodes.some((n) => n.id === testNodeId)).toBe(true);
+    expect(useEditorStore.getState().saveStatus).toBe('unsaved');
+
+    // 가상 저장 실패 발생
+    useEditorStore.getState().setSaveStatus('error');
+    expect(useEditorStore.getState().saveStatus).toBe('error');
+
+    // 실패 후에도 노드가 스토어에 그대로 남아있는지 검증
+    const currentNodes = useEditorStore.getState().nodes;
+    expect(currentNodes.some((n) => n.id === testNodeId)).toBe(true);
+  });
 });

@@ -32,30 +32,59 @@ export async function loadWorkflowBundle(workflowId: string): Promise<DbWorkflow
     return null;
   }
 
-  try {
-    const supabase = await createClient();
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
-    // 1. sections 조회
-    const { data: sectionsData, error: secError } = await supabase
-      .from('sections')
-      .select('*')
-      .eq('workflow_id', workflowId)
-      .order('position', { ascending: true });
+  if (isSupabaseConfigured) {
+    try {
+      const supabase = await createClient();
 
-    // 2. nodes 조회
-    const { data: nodesData, error: nodeError } = await supabase
-      .from('nodes')
-      .select('*')
-      .eq('workflow_id', workflowId);
+      // 1. sections 조회
+      const { data: sectionsData, error: secError } = await supabase
+        .from('sections')
+        .select('*')
+        .eq('workflow_id', workflowId)
+        .order('position', { ascending: true });
 
-    // 3. edges 조회
-    const { data: edgesData, error: edgeError } = await supabase
-      .from('edges')
-      .select('*')
-      .eq('workflow_id', workflowId);
+      // 2. nodes 조회
+      const { data: nodesData, error: nodeError } = await supabase
+        .from('nodes')
+        .select('*')
+        .eq('workflow_id', workflowId);
 
-    if (secError || nodeError || edgeError) {
-      // 테이블 미생성 또는 에러 시 폴백 조회
+      // 3. edges 조회
+      const { data: edgesData, error: edgeError } = await supabase
+        .from('edges')
+        .select('*')
+        .eq('workflow_id', workflowId);
+
+      if (secError || nodeError || edgeError) {
+        // 테스트 환경이 아닐 경우 목 폴백을 하지 않고 null 반환
+        if (process.env.NODE_ENV !== 'test') {
+          console.error('[Persistence] Supabase query error:', secError || nodeError || edgeError);
+          return null;
+        }
+        const fallback = global.__mockEditorData?.[workflowId];
+        return {
+          workflow,
+          sections: fallback?.sections || [],
+          nodes: fallback?.nodes || [],
+          edges: fallback?.edges || [],
+        };
+      }
+
+      return {
+        workflow,
+        sections: (sectionsData as DbSection[]) || [],
+        nodes: (nodesData as DbNode[]) || [],
+        edges: (edgesData as DbEdge[]) || [],
+      };
+    } catch (err) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.error('[Persistence] Supabase connection error:', err);
+        return null;
+      }
       const fallback = global.__mockEditorData?.[workflowId];
       return {
         workflow,
@@ -64,14 +93,10 @@ export async function loadWorkflowBundle(workflowId: string): Promise<DbWorkflow
         edges: fallback?.edges || [],
       };
     }
+  }
 
-    return {
-      workflow,
-      sections: (sectionsData as DbSection[]) || [],
-      nodes: (nodesData as DbNode[]) || [],
-      edges: (edgesData as DbEdge[]) || [],
-    };
-  } catch {
+  // Supabase 환경변수가 없는 경우: 테스트 환경에서만 mock fallback 허용
+  if (process.env.NODE_ENV === 'test') {
     const fallback = global.__mockEditorData?.[workflowId];
     return {
       workflow,
@@ -80,6 +105,8 @@ export async function loadWorkflowBundle(workflowId: string): Promise<DbWorkflow
       edges: fallback?.edges || [],
     };
   }
+
+  return null;
 }
 
 /**
@@ -95,6 +122,31 @@ export async function saveWorkflowSnapshot(
 
   const { sections: dbSections, nodes: dbNodes, edges: dbEdges } = mapSnapshotToDbPayload(snapshot);
 
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+
+  // 1. 테스트 환경이면서 Supabase 미설정 시에만 단위 테스트용 in-memory mock 저장 수행
+  if (!isSupabaseConfigured && process.env.NODE_ENV === 'test') {
+    if (global.__mockEditorData) {
+      global.__mockEditorData[workflowId] = {
+        sections: dbSections || [],
+        nodes: dbNodes,
+        edges: dbEdges,
+      };
+    }
+    return { success: true };
+  }
+
+  // 2. 프로덕션/개발 환경에서 환경변수 미설정 시 즉시 명확한 에러 반환
+  if (!isSupabaseConfigured) {
+    return {
+      success: false,
+      error: 'Supabase 클라우드 데이터베이스 연결 설정이 구성되지 않았습니다.',
+    };
+  }
+
+  // 3. 실제 Supabase 클라우드 저장 시도
   try {
     const supabase = await createClient();
 
@@ -170,10 +222,10 @@ export async function saveWorkflowSnapshot(
       .update({ updated_at: new Date().toISOString() })
       .eq('id', workflowId);
 
-    // Fallback 스토어도 동기화
-    if (global.__mockEditorData) {
+    // 테스트 환경 호환용 mock 동기화
+    if (process.env.NODE_ENV === 'test' && global.__mockEditorData) {
       global.__mockEditorData[workflowId] = {
-        sections: dbSections,
+        sections: dbSections || [],
         nodes: dbNodes,
         edges: dbEdges,
       };
@@ -181,16 +233,8 @@ export async function saveWorkflowSnapshot(
 
     return { success: true };
   } catch (error: unknown) {
-    // Supabase DB 저장 실패 시 인메모리 폴백으로 처리
-    if (global.__mockEditorData) {
-      global.__mockEditorData[workflowId] = {
-        sections: dbSections || [],
-        nodes: dbNodes,
-        edges: dbEdges,
-      };
-      return { success: true };
-    }
-
+    // [P1 FIX: Silent Fallback 제거]
+    // 저장이 실패했을 때 절대 mock 저장으로 대체하고 success: true를 반환하지 않음!
     const errorMsg =
       error instanceof Error ? error.message : '워크플로우 저장 중 알 수 없는 오류가 발생했습니다.';
     return {
