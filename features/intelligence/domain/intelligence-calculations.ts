@@ -1,8 +1,17 @@
 /**
  * Operations Intelligence Pure Calculation Engine
- * Phase 22 — Pure Deterministic Functions
+ * Phase 22 — Pure Deterministic Functions & Backward Compatible Core
  */
 
+import { DbNode } from '@/lib/persistence/workflow-types';
+import {
+  OperationsOverviewMetrics,
+  OwnerLoadItem,
+  ToolUsageItem,
+  WorkflowAnalysisInput,
+  WorkflowAnalysisResult,
+  BottleneckItem,
+} from '../types/intelligence-types';
 import {
   IntelligenceInputNode,
   WorkflowMetrics,
@@ -11,48 +20,56 @@ import {
 } from './intelligence-types';
 
 /**
- * 노드에서 시간(분)을 추출하는 정규화 헬퍼 (null/undefined/음수/NaN 안전 처리)
+ * 안전한 숫자 파싱 (null, undefined, NaN, 음수 방어)
  */
-export function extractNodeMinutes(node: IntelligenceInputNode): number {
-  const val = node.durationMinutes ?? node.duration;
-  if (val === null || val === undefined || isNaN(val)) {
+export function safeNumber(value: number | null | undefined): number {
+  if (value === null || value === undefined || isNaN(value)) {
     return 0;
   }
-  return Math.max(0, val);
+  return Math.max(0, value);
 }
 
 /**
- * 노드의 소요 시간이 누락(null/undefined)되었는지 판별
+ * 노드에서 시간(분)을 추출하는 정규화 헬퍼 (null/undefined/음수/NaN 안전 처리)
  */
-export function isNodeMinutesMissing(node: IntelligenceInputNode): boolean {
-  const val = node.durationMinutes ?? node.duration;
+export function extractNodeMinutes(node: IntelligenceInputNode | DbNode): number {
+  const n = node as any;
+  const val = n.durationMinutes ?? n.duration;
+  return safeNumber(val);
+}
+
+/**
+ * 노드의 소요 시간이 누락(null/undefined/NaN)되었는지 판별
+ */
+export function isNodeMinutesMissing(node: IntelligenceInputNode | DbNode): boolean {
+  const n = node as any;
+  const val = n.durationMinutes ?? n.duration;
   return val === null || val === undefined || isNaN(val);
 }
 
 /**
  * 노드에서 비용(원)을 추출하는 정규화 헬퍼 (null/undefined/음수/NaN 안전 처리)
  */
-export function extractNodeCost(node: IntelligenceInputNode): number {
-  const val = node.costAmount ?? node.cost;
-  if (val === null || val === undefined || isNaN(val)) {
-    return 0;
-  }
-  return Math.max(0, val);
+export function extractNodeCost(node: IntelligenceInputNode | DbNode): number {
+  const n = node as any;
+  const val = n.costAmount ?? n.cost;
+  return safeNumber(val);
 }
 
 /**
- * 노드의 비용이 누락(null/undefined)되었는지 판별
+ * 노드의 비용이 누락(null/undefined/NaN)되었는지 판별
  */
-export function isNodeCostMissing(node: IntelligenceInputNode): boolean {
-  const val = node.costAmount ?? node.cost;
+export function isNodeCostMissing(node: IntelligenceInputNode | DbNode): boolean {
+  const n = node as any;
+  const val = n.costAmount ?? n.cost;
   return val === null || val === undefined || isNaN(val);
 }
 
 /**
- * 총 소요 시간(분) 합산
+ * 단일 노드 목록으로부터 총 소요 시간(분) 합산
  * 빈 배열이거나 데이터가 없으면 0 반환
  */
-export function calculateTotalMinutes(nodes: IntelligenceInputNode[]): number {
+export function calculateTotalMinutes(nodes: (IntelligenceInputNode | DbNode)[]): number {
   if (!nodes || !Array.isArray(nodes) || nodes.length === 0) {
     return 0;
   }
@@ -60,10 +77,10 @@ export function calculateTotalMinutes(nodes: IntelligenceInputNode[]): number {
 }
 
 /**
- * 총 운영 비용 합산
+ * 단일 노드 목록으로부터 총 비용(원) 합산
  * 빈 배열이거나 데이터가 없으면 0 반환
  */
-export function calculateTotalCost(nodes: IntelligenceInputNode[]): number {
+export function calculateTotalCost(nodes: (IntelligenceInputNode | DbNode)[]): number {
   if (!nodes || !Array.isArray(nodes) || nodes.length === 0) {
     return 0;
   }
@@ -71,10 +88,10 @@ export function calculateTotalCost(nodes: IntelligenceInputNode[]): number {
 }
 
 /**
- * 단계당 평균 소요 시간(분) 계산
+ * 단계당 평균 소요 시간(분) 계산 (소수점 1자리 반올림)
  * 빈 배열이거나 데이터가 없으면 0 반환
  */
-export function calculateAverageMinutes(nodes: IntelligenceInputNode[]): number {
+export function calculateAverageMinutes(nodes: (IntelligenceInputNode | DbNode)[]): number {
   if (!nodes || !Array.isArray(nodes) || nodes.length === 0) {
     return 0;
   }
@@ -114,7 +131,7 @@ export function calculateWorkflowMetrics(nodes: IntelligenceInputNode[]): Workfl
 }
 
 /**
- * 담당자(Owner)별 업무 부하 집계
+ * 단일 워크플로우 내 담당자(Owner)별 업무 부하 집계 (Phase 22 신규)
  * 담당자 누락 시 "Unassigned"로 집계
  */
 export function calculateOwnerLoad(nodes: IntelligenceInputNode[]): OwnerLoad[] {
@@ -159,7 +176,70 @@ export function calculateOwnerLoad(nodes: IntelligenceInputNode[]): OwnerLoad[] 
 }
 
 /**
- * 도구(Tool)별 활용 집계
+ * 복수 워크플로우 입력 데이터로부터 담당자(Owner)별 부하 분석 집계 (기존 V1.1 서비스 호환)
+ */
+export function calculateOwnerLoads(inputs: WorkflowAnalysisInput[]): OwnerLoadItem[] {
+  if (!inputs || !Array.isArray(inputs) || inputs.length === 0) {
+    return [];
+  }
+
+  const map = new Map<
+    string,
+    {
+      ownerName: string;
+      role: string;
+      stepCount: number;
+      totalMinutes: number;
+      totalCost: number;
+      workflowIds: Set<string>;
+    }
+  >();
+
+  for (const input of inputs) {
+    const { workflow, nodes } = input;
+    if (!nodes || !Array.isArray(nodes)) continue;
+
+    for (const node of nodes) {
+      const ownerName = (node.owner && node.owner.trim()) || '담당자 미지정';
+      const role = (node.role && node.role.trim()) || '역할 미지정';
+      const key = `${ownerName}___${role}`;
+
+      const existing = map.get(key);
+      const minutes = safeNumber(node.duration);
+      const cost = safeNumber(node.cost);
+
+      if (existing) {
+        existing.stepCount += 1;
+        existing.totalMinutes += minutes;
+        existing.totalCost += cost;
+        existing.workflowIds.add(workflow.id);
+      } else {
+        map.set(key, {
+          ownerName,
+          role,
+          stepCount: 1,
+          totalMinutes: minutes,
+          totalCost: cost,
+          workflowIds: new Set([workflow.id]),
+        });
+      }
+    }
+  }
+
+  return Array.from(map.values())
+    .map((item) => ({
+      ownerName: item.ownerName,
+      role: item.role,
+      stepCount: item.stepCount,
+      totalMinutes: item.totalMinutes,
+      totalCost: item.totalCost,
+      workflowIds: Array.from(item.workflowIds),
+    }))
+    .sort((a, b) => b.totalMinutes - a.totalMinutes || b.stepCount - a.stepCount);
+}
+
+/**
+ * 단일 워크플로우 내 도구(Tool)별 활용 집계 (Phase 22 신규)
  * 도구 누락 시 "No tool specified"로 집계
  */
 export function calculateToolUsage(nodes: IntelligenceInputNode[]): ToolUsage[] {
@@ -182,6 +262,89 @@ export function calculateToolUsage(nodes: IntelligenceInputNode[]): ToolUsage[] 
       usageCount,
     }))
     .sort((a, b) => b.usageCount - a.usageCount);
+}
+
+/**
+ * 복수 워크플로우 입력 데이터로부터 도구(Tool)별 활용 통계 집계 (기존 V1.1 서비스 호환)
+ */
+export function calculateToolUsages(inputs: WorkflowAnalysisInput[]): ToolUsageItem[] {
+  if (!inputs || !Array.isArray(inputs) || inputs.length === 0) {
+    return [];
+  }
+
+  const map = new Map<
+    string,
+    {
+      toolName: string;
+      usageCount: number;
+      associatedOwners: Set<string>;
+      workflowIds: Set<string>;
+    }
+  >();
+
+  for (const input of inputs) {
+    const { workflow, nodes } = input;
+    if (!nodes || !Array.isArray(nodes)) continue;
+
+    for (const node of nodes) {
+      const toolName = (node.tool && node.tool.trim()) || '도구 미지정';
+      const ownerName = (node.owner && node.owner.trim()) || '담당자 미지정';
+
+      const existing = map.get(toolName);
+      if (existing) {
+        existing.usageCount += 1;
+        existing.associatedOwners.add(ownerName);
+        existing.workflowIds.add(workflow.id);
+      } else {
+        map.set(toolName, {
+          toolName,
+          usageCount: 1,
+          associatedOwners: new Set([ownerName]),
+          workflowIds: new Set([workflow.id]),
+        });
+      }
+    }
+  }
+
+  return Array.from(map.values())
+    .map((item) => ({
+      toolName: item.toolName,
+      usageCount: item.usageCount,
+      associatedOwners: Array.from(item.associatedOwners),
+      workflowIds: Array.from(item.workflowIds),
+    }))
+    .sort((a, b) => b.usageCount - a.usageCount);
+}
+
+/**
+ * 전체 운영 메트릭 요약 집계 (기존 V1.1 서비스 호환)
+ */
+export function calculateOverviewMetrics(
+  workflowResults: WorkflowAnalysisResult[],
+  allBottlenecks: BottleneckItem[]
+): OperationsOverviewMetrics {
+  if (!workflowResults || workflowResults.length === 0) {
+    return {
+      totalWorkflows: 0,
+      totalTimeMinutes: 0,
+      totalCostAmount: 0,
+      bottleneckCount: 0,
+      totalNodes: 0,
+    };
+  }
+
+  const totalTimeMinutes = workflowResults.reduce((acc, w) => acc + w.totalMinutes, 0);
+  const totalCostAmount = workflowResults.reduce((acc, w) => acc + w.totalCost, 0);
+  const totalNodes = workflowResults.reduce((acc, w) => acc + w.totalNodes, 0);
+  const bottleneckCount = (allBottlenecks && allBottlenecks.length) || 0;
+
+  return {
+    totalWorkflows: workflowResults.length,
+    totalTimeMinutes,
+    totalCostAmount,
+    bottleneckCount,
+    totalNodes,
+  };
 }
 
 /**
